@@ -17,9 +17,9 @@ Account logins (Mullvad, Proton, password vaults) always remain manual.
 
 ## Milestones
 
-### v1.0.0 — Core (current)
+### v1.0.0 — Core (released)
 
-First public release. Ships today:
+First public release:
 
 | Layer | Components |
 |--------|------------|
@@ -32,11 +32,26 @@ First public release. Ships today:
 
 No new default apps beyond this core.
 
+**Known limit at 1.0.0:** Linux package installs (Brave/Mullvad/Proton/Ollama) were solid; **hands-off LibreChat start on Linux was not** (Docker manual, Ollama daemon, `.env` hostnames, volume ownership).
+
+### v1.0.1 — Linux LibreChat reliability (current / in progress)
+
+Close the “installer succeeded but `:3080` never answers” gap on normal Linux desktops.
+
+- Start Ollama when the API is down (`systemctl` → background `ollama serve`, Linux `OLLAMA_HOST=0.0.0.0`)
+- Patch LibreChat `.env` for Compose service hostnames + host `UID`/`GID`
+- Compose override: `host.docker.internal:host-gateway` + `librechat.yaml` mount
+- Prepare bind-mount dirs + best-effort `chown`
+- `start` waits for HTTP health and prints diagnostics on failure
+- Honest platform docs for remaining nested-Docker / vfs limits
+
+**Still open after 1.0.1:** automatic Docker Engine install on Linux; guaranteeing Meili/Mongo under nested vfs; full “Linux just works” certification.
+
 ### v1.1 — Guided hardening (planned)
 
 Make the workstation *finishable* without changing OS security policy automatically.
 
-- Post-install checklist (printed after `install` / `repair`; possible `checklist` subcommand)
+- Post-install checklist (printed after `install` / `repair`; possible `checklist` subcommand) — include Linux LibreChat recovery steps
 - Disk encryption **detection** (BitLocker / LUKS) in audit/status/report
 - Firewall **detection** in audit/status/report
 - Conservative wording (“not detected” ≠ “insecure”)

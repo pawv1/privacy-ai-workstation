@@ -84,7 +84,7 @@ from typing import Any, Optional
 # ============================================================================
 
 APP_NAME = "Privacy AI Workstation"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 BASE_DIR = Path.home() / ".llm-workstation"
 LOG_FILE = BASE_DIR / "llm-workstation.log"
@@ -1432,6 +1432,104 @@ def wait_for_ollama(
 
         time.sleep(1)
 
+    return False
+
+
+def _linux_uid_gid() -> tuple[Optional[str], Optional[str]]:
+    if os.name == "nt":
+        return None, None
+    try:
+        return str(os.getuid()), str(os.getgid())
+    except AttributeError:
+        return None, None
+
+
+def ensure_ollama_running(
+    *,
+    timeout: int = 45,
+    dry_run: bool = False,
+) -> bool:
+    """
+    Make sure the Ollama HTTP API is reachable.
+
+    On Linux desktops without a working systemd user/service unit, install.sh
+    alone is not enough — `ollama serve` must be running. We try systemd first,
+    then fall back to a background `ollama serve` with OLLAMA_HOST suitable for
+    Docker containers reaching the host.
+    """
+
+    if ollama_api_available():
+        return True
+
+    if not command_exists("ollama"):
+        log.error("Ollama is not installed.")
+        return False
+
+    if dry_run:
+        log.info("[DRY RUN] Would start Ollama API if it is not running.")
+        return True
+
+    log.info("Ollama API is not responding; attempting to start it...")
+
+    started = False
+
+    if os.name != "nt" and command_exists("systemctl"):
+        for command in (
+            ["systemctl", "--user", "start", "ollama"],
+            ["systemctl", "start", "ollama"],
+            ["sudo", "systemctl", "start", "ollama"],
+        ):
+            try:
+                result = run_command(command, timeout=30)
+                if result.returncode == 0:
+                    started = True
+                    log.info("Started Ollama via: %s", " ".join(command))
+                    break
+            except Exception:
+                continue
+
+    if not started:
+        env = os.environ.copy()
+        # Containers (LibreChat) need to reach the host listener.
+        if os.name != "nt":
+            env.setdefault("OLLAMA_HOST", "0.0.0.0:11434")
+
+        log.info(
+            "Starting `ollama serve` in the background%s...",
+            " (OLLAMA_HOST=0.0.0.0:11434)" if os.name != "nt" else "",
+        )
+        try:
+            # Detached process; do not capture — serve is long-lived.
+            kwargs: dict[str, Any] = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "stdin": subprocess.DEVNULL,
+                "env": env,
+            }
+            if os.name == "nt":
+                kwargs["creationflags"] = getattr(
+                    subprocess,
+                    "CREATE_NEW_PROCESS_GROUP",
+                    0,
+                ) | getattr(subprocess, "DETACHED_PROCESS", 0)
+            else:
+                kwargs["start_new_session"] = True
+
+            subprocess.Popen(["ollama", "serve"], **kwargs)
+            started = True
+        except Exception as exc:
+            log.error("Could not start `ollama serve`: %s", exc)
+            return False
+
+    if wait_for_ollama(timeout=timeout):
+        return True
+
+    log.error(
+        "Ollama did not become ready at %s within %ss. "
+        "Start it manually (`ollama serve` or your service manager), then retry.",
+        OLLAMA_URL,
+        timeout,
+    )
     return False
 
 
@@ -3115,6 +3213,145 @@ def ensure_librechat_repository(
         return False
 
 
+def _upsert_env_key(text: str, key: str, value: str) -> str:
+    """
+    Set KEY=value in a dotenv-style file.
+    Replaces an existing assignment (commented or not); otherwise appends.
+    """
+
+    pattern = re.compile(
+        rf"^[ \t]*#?[ \t]*{re.escape(key)}[ \t]*=.*$",
+        re.MULTILINE,
+    )
+    line = f"{key}={value}"
+    if pattern.search(text):
+        return pattern.sub(line, text, count=1)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text + f"\n# Privacy AI Workstation\n{line}\n"
+
+
+def patch_librechat_env_linux(env_path: Path) -> bool:
+    """
+    Apply Linux/Docker Compose hostname + UID/GID fixes to LibreChat .env.
+
+    Upstream .env.example defaults MONGO_URI/MEILI_HOST to localhost-style
+    values that break when the app reads .env inside Compose. Containers also
+    need UID/GID matching the host user for bind mounts.
+    """
+
+    if os.name == "nt":
+        return True
+
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        log.error("Could not read LibreChat .env: %s", exc)
+        return False
+
+    uid, gid = _linux_uid_gid()
+    updates = {
+        "MONGO_URI": "mongodb://mongodb:27017/LibreChat",
+        "MEILI_HOST": "http://meilisearch:7700",
+        "HOST": "0.0.0.0",
+        "DOMAIN_CLIENT": "http://localhost:3080",
+        "DOMAIN_SERVER": "http://localhost:3080",
+    }
+    if uid and gid:
+        updates["UID"] = uid
+        updates["GID"] = gid
+
+    original = text
+    for key, value in updates.items():
+        text = _upsert_env_key(text, key, value)
+
+    if text == original:
+        return True
+
+    try:
+        env_path.write_text(text, encoding="utf-8")
+        log.info(
+            "Patched LibreChat .env for Docker Compose on Linux "
+            "(service hostnames + UID/GID)."
+        )
+        return True
+    except OSError as exc:
+        log.error("Could not write LibreChat .env: %s", exc)
+        return False
+
+
+def prepare_librechat_data_dirs(librechat_dir: Path) -> bool:
+    """
+    Create common LibreChat bind-mount directories and best-effort chown on Linux.
+    """
+
+    meili_dirs = sorted(librechat_dir.glob("meili_data*"))
+    targets = [
+        librechat_dir / "data-node",
+        librechat_dir / "images",
+        librechat_dir / "uploads",
+        librechat_dir / "logs",
+        *meili_dirs,
+    ]
+    # Ensure at least one meili data dir name exists even before first pull.
+    if not meili_dirs:
+        targets.append(librechat_dir / "meili_data")
+
+    for path in targets:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("Could not create %s: %s", path, exc)
+
+    if os.name == "nt":
+        return True
+
+    uid, gid = _linux_uid_gid()
+    if not uid or not gid:
+        return True
+
+    # Prefer plain chown when we own the tree; fall back to sudo.
+    paths = [str(p) for p in targets if p.exists()]
+    if not paths:
+        return True
+
+    try:
+        result = run_command(
+            ["chown", "-R", f"{uid}:{gid}", *paths],
+            timeout=120,
+        )
+        if result.returncode == 0:
+            log.info("Set LibreChat data directory ownership to %s:%s", uid, gid)
+            return True
+    except Exception:
+        pass
+
+    if command_exists("sudo"):
+        try:
+            result = run_command(
+                ["sudo", "chown", "-R", f"{uid}:{gid}", *paths],
+                timeout=120,
+            )
+            if result.returncode == 0:
+                log.info(
+                    "Set LibreChat data directory ownership to %s:%s (via sudo)",
+                    uid,
+                    gid,
+                )
+                return True
+        except Exception as exc:
+            log.warning("sudo chown for LibreChat data dirs failed: %s", exc)
+
+    log.warning(
+        "Could not chown LibreChat data dirs. If Meili/Mongo fail with "
+        "permission errors, run: sudo chown -R %s:%s data-node images uploads "
+        "logs meili_data*  (from the LibreChat directory).",
+        uid,
+        gid,
+    )
+    return True
+
+
 def create_librechat_env(
     overwrite: bool = False,
 ) -> bool:
@@ -3130,24 +3367,28 @@ def create_librechat_env(
         )
         return False
 
-    if target.exists() and not overwrite:
-        log.info("Existing LibreChat .env preserved.")
-        return True
-
+    created = False
     try:
-        shutil.copyfile(
-            example,
-            target,
-        )
-
-        return True
-
+        if target.exists() and not overwrite:
+            log.info("Existing LibreChat .env preserved.")
+        else:
+            shutil.copyfile(example, target)
+            created = True
     except Exception as exc:
         log.error(
             "Could not create .env: %s",
             exc,
         )
         return False
+
+    # Always apply Linux Docker hostname / UID patches (idempotent upserts).
+    if os.name != "nt":
+        if not patch_librechat_env_linux(target):
+            return False
+    elif created:
+        pass
+
+    return True
 
 
 def configure_librechat_ollama() -> bool:
@@ -3156,6 +3397,7 @@ def configure_librechat_ollama() -> bool:
     container through Docker Compose override.
 
     We preserve an existing configuration instead of overwriting it.
+    On Linux, ensure host.docker.internal resolves via host-gateway.
     """
 
     librechat_dir = get_librechat_dir()
@@ -3191,14 +3433,33 @@ endpoints:
             encoding="utf-8",
         )
 
+    desired = """\
+services:
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./librechat.yaml:/app/librechat.yaml
+"""
+
     if override.exists():
         text = override.read_text(
             encoding="utf-8",
             errors="replace",
         )
 
-        # Don't modify an existing custom override automatically.
-        if "/app/librechat.yaml" in text:
+        has_mount = "/app/librechat.yaml" in text
+        has_host = "host.docker.internal:host-gateway" in text
+
+        if has_mount and (has_host or os.name == "nt"):
+            return True
+
+        if has_mount and not has_host and os.name != "nt":
+            log.warning(
+                "Existing docker-compose.override.yml mounts librechat.yaml "
+                "but is missing host.docker.internal:host-gateway. "
+                "Add that under services.api.extra_hosts if Ollama is unreachable."
+            )
             return True
 
         log.warning(
@@ -3211,17 +3472,17 @@ endpoints:
 
         return True
 
-    override.write_text(
-        """\
-services:
-  api:
-    volumes:
-      - ./librechat.yaml:/app/librechat.yaml
-""",
-        encoding="utf-8",
-    )
-
+    override.write_text(desired, encoding="utf-8")
     return True
+
+
+def wait_for_librechat(timeout: int = 120) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        if librechat_health():
+            return True
+        time.sleep(2)
+    return False
 
 
 def start_librechat() -> bool:
@@ -3238,6 +3499,14 @@ def start_librechat() -> bool:
         )
         return False
 
+    # Best-effort: Ollama should be up so the UI can list local models.
+    ensure_ollama_running(timeout=45)
+
+    if not create_librechat_env(overwrite=False):
+        log.warning("LibreChat .env could not be fully prepared.")
+    configure_librechat_ollama()
+    prepare_librechat_data_dirs(librechat_dir)
+
     try:
         result = run_command(
             [
@@ -3251,7 +3520,25 @@ def start_librechat() -> bool:
             cwd=librechat_dir,
         )
 
-        return result.returncode == 0
+        if result.returncode != 0:
+            log.error("docker compose up failed for LibreChat.")
+            return False
+
+        log.info("Waiting for LibreChat at %s ...", LIBRECHAT_URL)
+        if wait_for_librechat(timeout=180):
+            log.info("LibreChat is responding at %s", LIBRECHAT_URL)
+            return True
+
+        log.error(
+            "LibreChat containers were started but %s did not answer "
+            "within 180s. Check: docker compose -f %s/docker-compose.yml ps "
+            "and docker compose logs (mongodb / meilisearch / api). "
+            "On Linux, permission issues on data-node/meili_data* are common; "
+            "nested Docker with the vfs storage driver is also fragile.",
+            LIBRECHAT_URL,
+            librechat_dir,
+        )
+        return False
 
     except Exception as exc:
         log.error(
@@ -3322,13 +3609,10 @@ def pull_model(
         return False
 
     if not ollama_api_available():
-        log.info(
-            "Waiting for Ollama API to become ready..."
-        )
-        if not wait_for_ollama(timeout=60):
+        if not ensure_ollama_running(timeout=60):
             log.error(
                 "Ollama is installed but the API is not responding at %s. "
-                "Start Ollama, then retry.",
+                "Start Ollama (`ollama serve` or your service manager), then retry.",
                 OLLAMA_URL,
             )
             return False
@@ -3809,6 +4093,15 @@ def install(
 
     if not ensure_ollama(dry_run=args.dry_run):
         record("ollama", False)
+    elif not args.dry_run:
+        # Install alone does not always leave the API listening (esp. Linux
+        # without systemd). Start it so later model pulls / LibreChat work.
+        if not ensure_ollama_running(dry_run=False):
+            log.warning(
+                "Ollama is installed but the API is not running yet. "
+                "Start it with `ollama serve` (or your service manager) before "
+                "pulling models or using LibreChat."
+            )
 
     # ------------------------------------------------------------------
     # Docker
@@ -3845,11 +4138,14 @@ def install(
                 if not args.dry_run:
                     create_librechat_env()
                     configure_librechat_ollama()
+                    prepare_librechat_data_dirs(get_librechat_dir())
                     if os.name != "nt":
                         log.info(
-                            "Linux note: LibreChat containers reach Ollama via "
-                            "host.docker.internal. If models do not appear, set "
-                            "OLLAMA_HOST=0.0.0.0 for the Ollama service and restart it. "
+                            "Linux LibreChat notes: .env patched for Compose "
+                            "service hostnames + UID/GID; data dirs prepared; "
+                            "override adds host.docker.internal:host-gateway. "
+                            "Docker Engine is still manual on Linux. Nested "
+                            "Docker/vfs environments may still fail Meili/Mongo. "
                             "See docs/platforms.md."
                         )
             else:
@@ -4024,6 +4320,8 @@ def repair(
     if not command_exists("ollama"):
         if not ensure_ollama(dry_run=args.dry_run):
             failures.append("ollama")
+    elif not args.dry_run:
+        ensure_ollama_running(dry_run=False)
 
     if not getattr(args, "no_privacy", False):
         if not ensure_privacy_stack(
@@ -4055,6 +4353,7 @@ def repair(
         elif not args.dry_run:
             create_librechat_env()
             configure_librechat_ollama()
+            prepare_librechat_data_dirs(get_librechat_dir())
 
     software = audit_software()
 

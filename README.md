@@ -1,12 +1,12 @@
 # Privacy AI Workstation
 
-**Version:** 1.0.0
+**Version:** 1.0.1
 
 Cross-platform installer and auditor for a **privacy-focused local AI workstation**.
 
 It scans your machine, installs what is missing, skips what is already healthy, and optionally upgrades selected components with `--update`.
 
-**v1.0.0** ships a lean **core** stack (local AI + privacy apps + tooling). It is not a full OS hardener. Planned extras (checklists, KeePassXC, optional profiles) are documented in [ROADMAP.md](ROADMAP.md).
+**v1.0.x** ships a lean **core** stack (local AI + privacy apps + tooling). It is not a full OS hardener. On Linux, privacy apps + Ollama install cleanly; LibreChat still needs Docker Engine installed manually, and nested/vfs Docker setups can fail even after PAW’s start-path fixes — see [docs/platforms.md](docs/platforms.md) and [ROADMAP.md](ROADMAP.md).
 
 ## What you get
 
@@ -45,8 +45,8 @@ If Python is missing, use the **bootstrap** helpers below (or install Python man
 |-----------|---------|-------|
 | Git, Node.js, VSCodium | Yes | Best-effort |
 | Ollama | Yes | Yes |
-| Docker / Compose | Yes (Docker Desktop via winget) | Detects; usually **manual** install |
-| LibreChat | Yes — clones repo + configures Ollama endpoint | Yes — same |
+| Docker / Compose | Yes (Docker Desktop via winget) | Detects; **manual** Engine install |
+| LibreChat | Yes — clones, configures, can `--start` | Yes — clones + Linux `.env`/UID/`extra_hosts`/data-dir prep; `--start` waits for `:3080` |
 | Brave, DuckDuckGo, Mullvad VPN, Proton Mail | Yes | Brave / Mullvad / Proton yes; DuckDuckGo **no official Linux app** |
 
 So: **LibreChat is pulled by the script.** Docker is installed automatically on Windows when possible; on Linux you often install Docker yourself first, then the script sets up LibreChat on top of it.

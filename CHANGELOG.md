@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## 1.0.1
+
+Linux LibreChat / Ollama reliability (partial pass → closer to hands-off on normal desktops):
+
+- Start Ollama when the API is down: try `systemctl`, then background `ollama serve` (Linux defaults `OLLAMA_HOST=0.0.0.0:11434`)
+- Patch LibreChat `.env` on Linux for Compose hostnames (`mongodb`, `meilisearch`), `HOST`, and host `UID`/`GID`
+- Compose override includes `host.docker.internal:host-gateway` when creating a new override
+- Create LibreChat data dirs and best-effort `chown` before `docker compose up`
+- `start` waits for `http://127.0.0.1:3080` and logs recovery hints on timeout
+- Document honest Linux LibreChat limits (manual Docker Engine; nested Docker/vfs still fragile)
+
 ## 1.0.0
 
 First public release.
