@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+.env.*
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local reports / runtime (user machine)
+.llm-workstation/
+*.log
+
+# Test / temp
+.pytest_cache/
+.coverage
+htmlcov/
+tmp/
+temp/
+*.tmp
