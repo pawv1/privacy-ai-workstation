@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## 1.0.2
+
+LibreChat polish after the overlayfs/WSL acceptance pass:
+
+- Merge `host.docker.internal:host-gateway` into **existing** `docker-compose.override.yml` (backup `.bak` once); still create a full override when missing
+- Fill blank LibreChat secrets when empty: `ADMIN_PANEL_SESSION_SECRET`, `JWT_SECRET`, `JWT_REFRESH_SECRET`, `CREDS_KEY`, `CREDS_IV`, `MEILI_MASTER_KEY` (never overwrite set values)
+- Add `--yes` / `-y` to `repair` for non-interactive use
+- Document Linux LibreChat support matrix: normal overlay2/overlayfs desktop supported; nested Docker / vfs unsupported
+
 ## 1.0.1
 
 Linux LibreChat / Ollama reliability (partial pass → closer to hands-off on normal desktops):

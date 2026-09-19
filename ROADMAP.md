@@ -34,7 +34,7 @@ No new default apps beyond this core.
 
 **Known limit at 1.0.0:** Linux package installs (Brave/Mullvad/Proton/Ollama) were solid; **hands-off LibreChat start on Linux was not** (Docker manual, Ollama daemon, `.env` hostnames, volume ownership).
 
-### v1.0.1 — Linux LibreChat reliability (current / in progress)
+### v1.0.1 — Linux LibreChat reliability (released)
 
 Close the “installer succeeded but `:3080` never answers” gap on normal Linux desktops.
 
@@ -45,7 +45,14 @@ Close the “installer succeeded but `:3080` never answers” gap on normal Linu
 - `start` waits for HTTP health and prints diagnostics on failure
 - Honest platform docs for remaining nested-Docker / vfs limits
 
-**Still open after 1.0.1:** automatic Docker Engine install on Linux; guaranteeing Meili/Mongo under nested vfs; full “Linux just works” certification.
+Proven on WSL2 Ubuntu + Docker Engine with **overlayfs** (`:3080` → HTTP 200). Nested Docker / **vfs** remains unsupported for E2E LibreChat.
+
+### v1.0.2 — LibreChat polish (current)
+
+- Merge `host.docker.internal` into **existing** Compose overrides (not warn-only)
+- Fill blank admin/JWT/creds/Meili secrets so admin-panel stops restart-looping
+- `repair --yes` for non-interactive automation
+- Support-matrix docs: overlay2/overlayfs desktop = supported; nested/vfs = unsupported
 
 ### v1.1 — Guided hardening (planned)
 

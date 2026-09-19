@@ -1,12 +1,12 @@
 # Privacy AI Workstation
 
-**Version:** 1.0.1
+**Version:** 1.0.2
 
 Cross-platform installer and auditor for a **privacy-focused local AI workstation**.
 
 It scans your machine, installs what is missing, skips what is already healthy, and optionally upgrades selected components with `--update`.
 
-**v1.0.x** ships a lean **core** stack (local AI + privacy apps + tooling). It is not a full OS hardener. On Linux, privacy apps + Ollama install cleanly; LibreChat still needs Docker Engine installed manually, and nested/vfs Docker setups can fail even after PAW’s start-path fixes — see [docs/platforms.md](docs/platforms.md) and [ROADMAP.md](ROADMAP.md).
+**v1.0.x** ships a lean **core** stack (local AI + privacy apps + tooling). It is not a full OS hardener. On Linux, install Docker Engine yourself; LibreChat is supported on normal **overlay2/overlayfs** desktops (verified). Nested Docker / **vfs** is unsupported for end-to-end LibreChat — see [docs/platforms.md](docs/platforms.md) and [ROADMAP.md](ROADMAP.md).
 
 ## What you get
 
@@ -129,6 +129,8 @@ Helpers (assume Python is already present):
 | `start` / `stop` | Start or stop LibreChat |
 
 Useful `install` flags: `--dry-run`, `--yes`, `--update`, `--no-privacy`, `--no-librechat`, `--model`, `--pull-model`, `--start`.
+
+Useful `repair` flags: `--yes`, `--dry-run`, `--update`, `--no-privacy`, `--no-librechat`, `--no-docker`.
 
 ## Behavior
 

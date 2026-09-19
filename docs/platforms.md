@@ -36,29 +36,24 @@ LibreChat is cloned with Git and started with Docker Compose.
 - **DuckDuckGo Desktop:** no official Linux build — skipped; Brave is the privacy browser on Linux
 - **Ollama package install:** official `install.sh` when `curl` is available
 
-### Honest limits (LibreChat / Docker)
+### LibreChat support matrix (Linux)
 
-Linux is a solid **package installer** for privacy apps + Ollama. It is **not** yet a fully hands-off “one command healthy LibreChat” path on every box.
+| Environment | LibreChat E2E (`:3080`) | Notes |
+|-------------|-------------------------|--------|
+| Normal desktop / WSL2 + Docker Engine with **overlay2** / **overlayfs** | **Supported** | Verified with PAW v1.0.1+ (`repair` / `start` → HTTP 200) |
+| Nested Docker / Docker-in-Docker with **vfs** | **Unsupported** | DNS may work while TCP between Compose peers times out — not treated as a PAW regression |
+| No Docker Engine installed | Blocked | PAW detects/guides only; install Engine yourself, then rerun |
+
+### What PAW configures for LibreChat
 
 | Topic | Behavior |
 |--------|----------|
-| **Docker Engine** | Detect + guide only. Automatic install is intentionally skipped (distro-specific). Install Docker yourself, then rerun. |
-| **Ollama daemon** | After install, PAW tries `systemctl` (user/system) then falls back to background `ollama serve` with `OLLAMA_HOST=0.0.0.0:11434`. On odd environments without systemd this still helps, but you may need to keep that process alive. |
-| **LibreChat `.env`** | On Linux, PAW upserts Compose-friendly values: `MONGO_URI=mongodb://mongodb:27017/LibreChat`, `MEILI_HOST=http://meilisearch:7700`, `HOST=0.0.0.0`, plus host `UID`/`GID`. |
-| **Compose override** | Adds `host.docker.internal:host-gateway` and mounts `librechat.yaml` when no override exists yet. Existing custom overrides are not rewritten. |
-| **Bind mounts** | Creates `data-node`, `images`, `uploads`, `logs`, `meili_data*` and best-effort `chown` to the current user (sudo if needed). |
-| **`start` health** | After `docker compose up -d`, waits for `http://127.0.0.1:3080`. Failure prints diagnostics guidance. |
-
-### Environments that still break LibreChat
-
-These are **outside** what PAW can fully paper over:
-
-- Nested Docker / Docker-in-Docker forcing the **vfs** storage driver (Meili/Mongo often time out)
-- Rootless Docker with unusual UID mapping
-- Locked-down hosts where `chown`/`sudo` cannot fix volume ownership
-- Very slow disks where 180s health wait is not enough
-
-On a normal desktop with systemd, a real disk, and Docker Engine installed from upstream docs, the Linux start path is much more reliable after the v1.0.1 fixes — but **“Linux just works” for LibreChat is still an open reliability goal**, not a hard guarantee.
+| **Docker Engine** | Detect + guide only. Automatic install is intentionally skipped (distro-specific). |
+| **Ollama daemon** | Tries `systemctl`, then background `ollama serve` with `OLLAMA_HOST=0.0.0.0:11434` when needed. |
+| **LibreChat `.env`** | Linux: Compose hostnames + `UID`/`GID`. All platforms: fill **blank** secrets (`ADMIN_PANEL_SESSION_SECRET`, JWT/creds/Meili) without overwriting set values. |
+| **Compose override** | Creates override with `host.docker.internal:host-gateway` + `librechat.yaml` mount when missing; **merges** `host-gateway` into existing overrides (writes `.bak` once). |
+| **Bind mounts** | Creates `data-node`, `images`, `uploads`, `logs`, `meili_data*` and best-effort `chown`. |
+| **`start` health** | After `docker compose up -d`, waits for `http://127.0.0.1:3080` and prints diagnostics on failure. |
 
 ### Manual recovery (if `:3080` never answers)
 

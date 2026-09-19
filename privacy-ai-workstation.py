@@ -66,6 +66,7 @@ import logging
 import os
 import platform
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -84,7 +85,7 @@ from typing import Any, Optional
 # ============================================================================
 
 APP_NAME = "Privacy AI Workstation"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 BASE_DIR = Path.home() / ".llm-workstation"
 LOG_FILE = BASE_DIR / "llm-workstation.log"
@@ -3231,6 +3232,70 @@ def _upsert_env_key(text: str, key: str, value: str) -> str:
     return text + f"\n# Privacy AI Workstation\n{line}\n"
 
 
+def _env_value(text: str, key: str) -> Optional[str]:
+    """Return the active (uncommented) value for KEY, or None if unset."""
+
+    pattern = re.compile(
+        rf"^[ \t]*{re.escape(key)}[ \t]*=[ \t]*(.*)$",
+        re.MULTILINE,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None
+    return match.group(1).strip().strip('"').strip("'")
+
+
+def _env_needs_value(text: str, key: str) -> bool:
+    value = _env_value(text, key)
+    return value is None or value == ""
+
+
+def ensure_librechat_secrets(env_path: Path) -> bool:
+    """
+    Fill blank LibreChat secrets that commonly leave containers restarting.
+
+    Never overwrites a non-empty existing value.
+    """
+
+    try:
+        text = env_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        log.error("Could not read LibreChat .env: %s", exc)
+        return False
+
+    # CREDS_KEY = 32 bytes hex (64 chars), CREDS_IV = 16 bytes hex (32 chars)
+    # Session/JWT/Meili secrets: long random hex strings.
+    candidates = {
+        "ADMIN_PANEL_SESSION_SECRET": lambda: secrets.token_hex(32),
+        "JWT_SECRET": lambda: secrets.token_hex(32),
+        "JWT_REFRESH_SECRET": lambda: secrets.token_hex(32),
+        "CREDS_KEY": lambda: secrets.token_hex(32),
+        "CREDS_IV": lambda: secrets.token_hex(16),
+        "MEILI_MASTER_KEY": lambda: secrets.token_hex(16),
+    }
+
+    original = text
+    filled: list[str] = []
+    for key, factory in candidates.items():
+        if _env_needs_value(text, key):
+            text = _upsert_env_key(text, key, factory())
+            filled.append(key)
+
+    if text == original:
+        return True
+
+    try:
+        env_path.write_text(text, encoding="utf-8")
+        log.info(
+            "Filled blank LibreChat secrets: %s",
+            ", ".join(filled),
+        )
+        return True
+    except OSError as exc:
+        log.error("Could not write LibreChat secrets to .env: %s", exc)
+        return False
+
+
 def patch_librechat_env_linux(env_path: Path) -> bool:
     """
     Apply Linux/Docker Compose hostname + UID/GID fixes to LibreChat .env.
@@ -3385,10 +3450,57 @@ def create_librechat_env(
     if os.name != "nt":
         if not patch_librechat_env_linux(target):
             return False
-    elif created:
-        pass
+
+    if not ensure_librechat_secrets(target):
+        return False
 
     return True
+
+
+def _inject_compose_extra_hosts(text: str) -> tuple[str, bool]:
+    """
+    Ensure services.api.extra_hosts includes host.docker.internal:host-gateway.
+
+    Returns (new_text, changed).
+    """
+
+    marker = "host.docker.internal:host-gateway"
+    if marker in text:
+        return text, False
+
+    host_block = (
+        '    extra_hosts:\n'
+        '      - "host.docker.internal:host-gateway"\n'
+    )
+
+    # Case 1: api service already has extra_hosts — append our entry.
+    api_extra = re.search(
+        r"(?m)^(  api:(?:\n(?:    .*)?)*)\n(    extra_hosts:\n(?:      - .*\n)*)",
+        text,
+    )
+    if api_extra:
+        block = api_extra.group(2)
+        if marker in block:
+            return text, False
+        inserted = block + '      - "host.docker.internal:host-gateway"\n'
+        return text[: api_extra.start(2)] + inserted + text[api_extra.end(2) :], True
+
+    # Case 2: api service exists without extra_hosts — inject under api.
+    api_header = re.search(r"(?m)^(  api:\n)", text)
+    if api_header:
+        idx = api_header.end(1)
+        return text[:idx] + host_block + text[idx:], True
+
+    # Case 3: no api service — append a minimal services.api block.
+    addition = (
+        "\nservices:\n"
+        "  api:\n"
+        '    extra_hosts:\n'
+        '      - "host.docker.internal:host-gateway"\n'
+    )
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text + addition, True
 
 
 def configure_librechat_ollama() -> bool:
@@ -3396,8 +3508,8 @@ def configure_librechat_ollama() -> bool:
     Configures an Ollama custom endpoint and mounts it into the API
     container through Docker Compose override.
 
-    We preserve an existing configuration instead of overwriting it.
-    On Linux, ensure host.docker.internal resolves via host-gateway.
+    Existing overrides are preserved; on Linux we merge
+    host.docker.internal:host-gateway when missing.
     """
 
     librechat_dir = get_librechat_dir()
@@ -3442,37 +3554,58 @@ services:
       - ./librechat.yaml:/app/librechat.yaml
 """
 
-    if override.exists():
-        text = override.read_text(
-            encoding="utf-8",
-            errors="replace",
-        )
-
-        has_mount = "/app/librechat.yaml" in text
-        has_host = "host.docker.internal:host-gateway" in text
-
-        if has_mount and (has_host or os.name == "nt"):
-            return True
-
-        if has_mount and not has_host and os.name != "nt":
-            log.warning(
-                "Existing docker-compose.override.yml mounts librechat.yaml "
-                "but is missing host.docker.internal:host-gateway. "
-                "Add that under services.api.extra_hosts if Ollama is unreachable."
-            )
-            return True
-
-        log.warning(
-            "Existing docker-compose.override.yml detected."
-        )
-
-        log.warning(
-            "It was not modified automatically."
-        )
-
+    if not override.exists():
+        override.write_text(desired, encoding="utf-8")
+        log.info("Created docker-compose.override.yml for Ollama + librechat.yaml.")
         return True
 
-    override.write_text(desired, encoding="utf-8")
+    try:
+        text = override.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        log.error("Could not read docker-compose.override.yml: %s", exc)
+        return False
+
+    changed = False
+
+    if "/app/librechat.yaml" not in text:
+        # Preserve custom override content; append volume under api when possible.
+        api_header = re.search(r"(?m)^(  api:\n)", text)
+        volume_lines = (
+            "    volumes:\n"
+            "      - ./librechat.yaml:/app/librechat.yaml\n"
+        )
+        if api_header:
+            idx = api_header.end(1)
+            text = text[:idx] + volume_lines + text[idx:]
+            changed = True
+            log.info("Added librechat.yaml volume mount to existing override.")
+        else:
+            log.warning(
+                "Existing docker-compose.override.yml has no api service; "
+                "not auto-adding librechat.yaml mount."
+            )
+
+    if os.name != "nt":
+        text, host_changed = _inject_compose_extra_hosts(text)
+        if host_changed:
+            changed = True
+            log.info(
+                "Merged host.docker.internal:host-gateway into "
+                "docker-compose.override.yml."
+            )
+
+    if not changed:
+        return True
+
+    backup = override.with_suffix(override.suffix + ".bak")
+    try:
+        if not backup.exists():
+            shutil.copyfile(override, backup)
+        override.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        log.error("Could not update docker-compose.override.yml: %s", exc)
+        return False
+
     return True
 
 
@@ -4515,6 +4648,13 @@ def parse_args() -> argparse.Namespace:
     repair_parser = subparsers.add_parser(
         "repair",
         help="Repair missing/broken components.",
+    )
+
+    repair_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Non-interactive; accept defaults (same idea as install --yes).",
     )
 
     repair_parser.add_argument(
